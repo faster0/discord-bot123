@@ -1,4 +1,7 @@
 from datetime import datetime, timezone, timedelta
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import discord
 from discord.ext import commands, tasks
 
@@ -16,8 +19,8 @@ last_timer_message_id = None
 # Часовой пояс МСК (UTC+3)
 MSK = timezone(timedelta(hours=3))
 
-# Вставьте ваш цифровой ID сюда:
-OWNER_ID = 736990837254258838
+# Вставьте ваш цифровой ID сюда (можно переопределить через переменную OWNER_ID в Render):
+OWNER_ID = int(os.getenv("OWNER_ID", "736990837254258838"))
 
 ALL_DATA = {
     "Дары Моря": {
@@ -757,4 +760,36 @@ async def тайники(ctx):
     last_timer_message_id = msg.id
 
 
-bot.run("MTUyNDY2NjAxMTIzMDQwODc5Ng.GzDxHq.lP6ljSEw-i5DDUv9knPpEorpdqOBNccBIO0KY4")
+# --- Keep-alive для бесплатного Render (Web Service) ---
+# Render Free умеет держать только Web Service (Worker - платный).
+# Render требует, чтобы сервис слушал порт $PORT, иначе он не запустится.
+# Поэтому поднимаем tiny HTTP-сервер в фоне, а бот работает как обычно.
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Bot is alive".encode("utf-8"))
+
+    def log_message(self, format, *args):
+        # чтобы не спамить в логи при каждом пинге UptimeRobot
+        return
+
+
+def start_keep_alive():
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Keep-alive server запущен на порту {port}")
+
+
+if __name__ == "__main__":
+    start_keep_alive()
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    if not TOKEN:
+        raise ValueError(
+            "Нет токена! Добавь DISCORD_TOKEN в Render -> Environment Variables. "
+            "Локально можно создать .env или выполнить set DISCORD_TOKEN=xxx"
+        )
+    bot.run(TOKEN)
