@@ -1867,6 +1867,31 @@ def entry_points(entry: dict) -> int:
     return entry_voice_points(entry) + int(entry.get("manual_points", 0)) + int(entry.get("contract_points", 0))
 
 
+def fmt_hm(hours: float = None, seconds: int = None) -> str:
+    """Время по-человечески: 0.01 ч -> '1 мин', 1.5 -> '1 ч 30 мин', 8.0 -> '8 ч'."""
+    try:
+        total_min = int(round((seconds / 60))) if seconds is not None else int(round(float(hours) * 60))
+    except Exception:
+        total_min = 0
+    if total_min < 1:
+        return "меньше минуты"
+    h, m = divmod(total_min, 60)
+    if h <= 0:
+        return f"{m} мин"
+    if m <= 0:
+        return f"{h} ч"
+    return f"{h} ч {m} мин"
+
+
+def voice_progress_text(total_sec: int) -> str:
+    """Сколько осталось сидеть до +1 балла за войс."""
+    done = int(total_sec) % VOICE_SECONDS_PER_POINT
+    left = VOICE_SECONDS_PER_POINT - done
+    if done == 0 and int(total_sec) > 0:
+        return "есть +1 балл, следующий через 3 ч"
+    return f"до +1 балла за войс: {fmt_hm(seconds=left)} (сидишь {fmt_hm(seconds=done)} из 3 ч)"
+
+
 def get_contract(points: int):
     """Возвращает (римская цифра или '—', полное название)."""
     cur_roman, cur_name = "—", "—"
@@ -1936,12 +1961,12 @@ def build_activity_embed():
         color=discord.Color.green(),
     )
     if active:
-        txt = "\n".join(f"{i+1}. {n} — {h} ч. — {p} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(active[:15]))
+        txt = "\n".join(f"{i+1}. {n} — {fmt_hm(h)} ({int(h*60)} мин) — {p} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(active[:15]))
         e.add_field(name="🟢 АКТИВНЫЕ", value=txt, inline=False)
     else:
         e.add_field(name="🟢 АКТИВНЫЕ", value="Пока никого", inline=False)
     if inactive:
-        txt2 = "\n".join(f"{i+1}. {n} — {h} ч. — {p} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(inactive[:15]))
+        txt2 = "\n".join(f"{i+1}. {n} — {fmt_hm(h)} ({int(h*60)} мин) — {p} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(inactive[:15]))
         e.add_field(name="🔴 НЕАКТИВНЫЕ", value=txt2, inline=False)
     else:
         e.add_field(name="🔴 НЕАКТИВНЫЕ", value="—", inline=False)
@@ -1977,7 +2002,7 @@ def build_contracts_embed():
                 prog = "MAX"
             else:
                 prog = f"надо {need}, не хватает {miss}"
-            lines.append(f"**{n}** | {h} ч. | {p} | {roman} | {prog} | {st}")
+            lines.append(f"**{n}** | {fmt_hm(h)} | {p} | {roman} | {prog} | {st}")
         e.add_field(name=f"Всего: {len(rows)}", value="\n".join(lines), inline=False)
     e.set_footer(text=f"Контракты: {' / '.join(f'{n}={need}' for need, n, _r in sorted(CONTRACT_LEVELS))}")
     return e
@@ -2096,10 +2121,10 @@ class ActivityPagesView(discord.ui.View):
                 left_mark = " (вышел)" if r.get("left") else ""
                 if r["was"]:
                     lines.append(
-                        f"**{i}.** {r['display']}{left_mark}{voice_mark} — **{r['hours']} ч.** — **{r['points']}** баллов — {r['roman']} — {fmt_progress(r['points'])}"
+                        f"**{i}.** {r['display']}{left_mark}{voice_mark} — **{fmt_hm(r['hours'])}** ({int(r['hours']*60)} мин) — **{r['points']}** баллов — {r['roman']} — {fmt_progress(r['points'])}"
                     )
                 else:
-                    lines.append(f"**{i}.** {r['display']} — 0 ч. — 🔴 не заходил")
+                    lines.append(f"**{i}.** {r['display']} — 0 мин — 🔴 не заходил")
             # режем по лимиту Discord (1024 на field)
             text = "\n".join(lines)
             if len(text) > 1000:
@@ -2340,7 +2365,7 @@ async def show_contracts(ctx):
         rows.append((v.get("nick", "?"), h, p, roman))
     rows.sort(key=lambda x: x[2], reverse=True)
     for i, (n, h, p, roman) in enumerate(rows, start=1):
-        lines.append(f"**{i}.** {n} | {h} ч. | {p} | {roman} | {fmt_progress(p)}")
+        lines.append(f"**{i}.** {n} | {fmt_hm(h)} ({int(h*60)} мин) | {p} | {roman} | {fmt_progress(p)}")
     if not lines:
         lines = ["Пока пусто. Зайдите в войс — часы начнут капать."]
     view = SimplePagesView(f"📑 Контракты ({len(rows)})", lines, per_page=10)
@@ -2374,13 +2399,19 @@ async def my_stats(ctx, member: discord.Member = None):
         hist = entry.get("history", [])[-5:]
     else:
         hours, voice_pts, manual_pts, contract_pts, total, static, hist = 0, 0, 0, 0, 0, "—", []
+        base_sec = 0
     roman, cname = get_contract(total)
     # место в топе
     ranked = sorted((entry_points(v) for v in db.values()), reverse=True)
     place = next((i + 1 for i, p in enumerate(ranked) if total >= p), len(ranked) + 1) if ranked else 1
     in_voice = target.voice is not None and target.voice.channel is not None
+    total_min = int(base_sec // 60)
     e = discord.Embed(title=f"📊 Статистика: {target.display_name}", color=discord.Color.green())
-    e.add_field(name="⏱ Часы в войсе", value=f"**{hours} ч.** (3 ч. = 1 балл){' 🎙️ сейчас в войсе' if in_voice else ''}", inline=False)
+    e.add_field(
+        name="⏱ Время в войсе",
+        value=f"**{fmt_hm(seconds=base_sec)}** ({total_min} мин / {hours} ч.){' 🎙️ сейчас в войсе' if in_voice else ''}\n{voice_progress_text(base_sec)}",
+        inline=False,
+    )
     e.add_field(name="⭐ Баллы", value=f"Всего **{total}** (войс {voice_pts} + контракты {contract_pts} + вручную {manual_pts})", inline=False)
     e.add_field(name="📜 Контракт", value=f"**{roman}** ({cname})", inline=True)
     e.add_field(name="🎯 Дальше", value=fmt_progress(total), inline=True)
