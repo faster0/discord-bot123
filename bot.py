@@ -1125,6 +1125,7 @@ async def on_ready():
     try:
         bot.add_view(AnketaPanelView())
         bot.add_view(AnketaManageView(static=""))
+        bot.add_view(MyStatsView())
     except Exception as e:
         print(f"[add_view anketa]: {e}")
     if not check_contraband_reminders.is_running():
@@ -2372,11 +2373,8 @@ async def show_contracts(ctx):
     await ctx.send(embed=view.make_embed(), view=view)
 
 
-@bot.command(name="стата")
-async def my_stats(ctx, member: discord.Member = None):
-    """Своя статистика: !стата (себе) или !стата @юзер. Работает для всех."""
-    target = member or ctx.author
-    # смотреть чужую могут все? да — это мотивация. Если надо только себе — убери проверку ниже.
+def build_stats_embed_for(target: discord.Member, requester_name: str = "—") -> discord.Embed:
+    """Строит embed личной статистики (в минутах, понятно)."""
     db = load_activity()
     uid = str(target.id)
     entry = db.get(uid)
@@ -2401,10 +2399,12 @@ async def my_stats(ctx, member: discord.Member = None):
         hours, voice_pts, manual_pts, contract_pts, total, static, hist = 0, 0, 0, 0, 0, "—", []
         base_sec = 0
     roman, cname = get_contract(total)
-    # место в топе
     ranked = sorted((entry_points(v) for v in db.values()), reverse=True)
     place = next((i + 1 for i, p in enumerate(ranked) if total >= p), len(ranked) + 1) if ranked else 1
-    in_voice = target.voice is not None and target.voice.channel is not None
+    try:
+        in_voice = target.voice is not None and target.voice.channel is not None
+    except Exception:
+        in_voice = False
     total_min = int(base_sec // 60)
     e = discord.Embed(title=f"📊 Статистика: {target.display_name}", color=discord.Color.green())
     e.add_field(
@@ -2418,8 +2418,34 @@ async def my_stats(ctx, member: discord.Member = None):
     e.add_field(name="🏆 Место в топе", value=f"**{place}** из {max(len(ranked), 1)}", inline=True)
     e.add_field(name="🔑 Статик", value=f"`{static}`", inline=True)
     e.add_field(name="🕘 История", value="\n".join(hist) or "Пока пусто", inline=False)
-    e.set_footer(text=f"Запросил {ctx.author.display_name} • {datetime.now(MSK).strftime('%d.%m %H:%M')}")
-    await ctx.send(embed=e)
+    e.set_footer(text=f"Запросил {requester_name} • {datetime.now(MSK).strftime('%d.%m %H:%M')}")
+    return e
+
+
+class MyStatsView(discord.ui.View):
+    """Кнопка 'Моя статистика' — ответ виден ТОЛЬКО нажавшему (ephemeral)."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📊 Моя статистика", style=discord.ButtonStyle.primary, custom_id="mystats_show")
+    async def show_mine(self, interaction: discord.Interaction, button: discord.ui.Button):
+        e = build_stats_embed_for(interaction.user, interaction.user.display_name)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+@bot.command(name="стата")
+async def my_stats(ctx, member: discord.Member = None):
+    """!стата — кнопка, нажми и увидишь СВОЮ стату (невидимая, только тебе). !стата @юзер — показать юзера."""
+    if member is not None:
+        await ctx.send(embed=build_stats_embed_for(member, ctx.author.display_name))
+        return
+    e = discord.Embed(
+        title="📊 Твоя статистика",
+        description="Нажми кнопку ниже — бот покажет **твою** статистику.\nЕё увидишь **только ты** (невидимое сообщение).",
+        color=discord.Color.blue(),
+    )
+    await ctx.send(embed=e, view=MyStatsView())
 
 
 @bot.command(name="обновить-доски")
