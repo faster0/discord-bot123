@@ -1301,7 +1301,8 @@ ANKETA_TARGET_NAMES = ["анкеты", "досье", "заявки", "база"]
 ACTIVITY_CHANNEL_NAMES = ["активность-сотрудников", "активность"]  # канал 📊・активность-сотрудников
 CONTRACTS_CHANNEL_NAMES = ["контракты", "контракт"]  # канал 📑・контракты
 # Курс и пороги
-POINTS_PER_HOUR = 15  # 1 час в войсе = 15 баллов (8 ч. = 120 баллов как в примере)
+VOICE_SECONDS_PER_POINT = 3 * 3600  # 1 балл за 3 часа в войсе
+POINTS_PER_HOUR = 1 / 3  # для совместимости (1 балл / 3 часа)
 # (порог баллов, название, награда)
 CONTRACT_LEVELS = [
     (50, "Контракт I", "повышение"),
@@ -1853,9 +1854,17 @@ def entry_hours(entry: dict) -> float:
     return round(entry.get("seconds", 0) / 3600 + float(entry.get("manual_hours", 0)), 2)
 
 
+def entry_voice_points(entry: dict) -> int:
+    """Баллы только за войс: 1 балл за каждые 3 часа (точно, без ошибок округления)."""
+    try:
+        total_sec = int(entry.get("seconds", 0)) + int(float(entry.get("manual_hours", 0)) * 3600)
+    except Exception:
+        total_sec = int(entry.get("seconds", 0))
+    return total_sec // VOICE_SECONDS_PER_POINT
+
+
 def entry_points(entry: dict) -> int:
-    auto = int(entry_hours(entry) * POINTS_PER_HOUR)
-    return auto + int(entry.get("manual_points", 0)) + int(entry.get("contract_points", 0))
+    return entry_voice_points(entry) + int(entry.get("manual_points", 0)) + int(entry.get("contract_points", 0))
 
 
 def get_contract(points: int):
@@ -1942,7 +1951,7 @@ def build_activity_embed():
     for i, (need, name, reward) in enumerate(sorted(CONTRACT_LEVELS)):
         med = medals[i] if i < len(medals) else "•"
         e.add_field(name=f"{med} {name}", value=f"Требование: {need} баллов\nНаграда: {reward}", inline=True)
-    e.set_footer(text=f"1 час = {POINTS_PER_HOUR} баллов • Обновлено {datetime.now(MSK).strftime('%d.%m %H:%M')}")
+    e.set_footer(text=f"3 часа в войсе = 1 балл • Обновлено {datetime.now(MSK).strftime('%d.%m %H:%M')}")
     return e
 
 
@@ -2336,6 +2345,50 @@ async def show_contracts(ctx):
         lines = ["Пока пусто. Зайдите в войс — часы начнут капать."]
     view = SimplePagesView(f"📑 Контракты ({len(rows)})", lines, per_page=10)
     await ctx.send(embed=view.make_embed(), view=view)
+
+
+@bot.command(name="стата")
+async def my_stats(ctx, member: discord.Member = None):
+    """Своя статистика: !стата (себе) или !стата @юзер. Работает для всех."""
+    target = member or ctx.author
+    # смотреть чужую могут все? да — это мотивация. Если надо только себе — убери проверку ниже.
+    db = load_activity()
+    uid = str(target.id)
+    entry = db.get(uid)
+    now_ts = datetime.now(MSK).timestamp()
+    if entry:
+        base_sec = int(entry.get("seconds", 0))
+        if uid in voice_join_ts:
+            try:
+                base_sec += max(0, int(now_ts - voice_join_ts[uid]))
+            except Exception:
+                pass
+        tmp = dict(entry)
+        tmp["seconds"] = base_sec
+        hours = round(base_sec / 3600 + float(entry.get("manual_hours", 0)), 2)
+        voice_pts = entry_voice_points(tmp)
+        manual_pts = int(entry.get("manual_points", 0))
+        contract_pts = int(entry.get("contract_points", 0))
+        total = voice_pts + manual_pts + contract_pts
+        static = entry.get("static") or "—"
+        hist = entry.get("history", [])[-5:]
+    else:
+        hours, voice_pts, manual_pts, contract_pts, total, static, hist = 0, 0, 0, 0, 0, "—", []
+    roman, cname = get_contract(total)
+    # место в топе
+    ranked = sorted((entry_points(v) for v in db.values()), reverse=True)
+    place = next((i + 1 for i, p in enumerate(ranked) if total >= p), len(ranked) + 1) if ranked else 1
+    in_voice = target.voice is not None and target.voice.channel is not None
+    e = discord.Embed(title=f"📊 Статистика: {target.display_name}", color=discord.Color.green())
+    e.add_field(name="⏱ Часы в войсе", value=f"**{hours} ч.** (3 ч. = 1 балл){' 🎙️ сейчас в войсе' if in_voice else ''}", inline=False)
+    e.add_field(name="⭐ Баллы", value=f"Всего **{total}** (войс {voice_pts} + контракты {contract_pts} + вручную {manual_pts})", inline=False)
+    e.add_field(name="📜 Контракт", value=f"**{roman}** ({cname})", inline=True)
+    e.add_field(name="🎯 Дальше", value=fmt_progress(total), inline=True)
+    e.add_field(name="🏆 Место в топе", value=f"**{place}** из {max(len(ranked), 1)}", inline=True)
+    e.add_field(name="🔑 Статик", value=f"`{static}`", inline=True)
+    e.add_field(name="🕘 История", value="\n".join(hist) or "Пока пусто", inline=False)
+    e.set_footer(text=f"Запросил {ctx.author.display_name} • {datetime.now(MSK).strftime('%d.%m %H:%M')}")
+    await ctx.send(embed=e)
 
 
 @bot.command(name="обновить-доски")
