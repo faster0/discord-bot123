@@ -1605,7 +1605,7 @@ class AnketaModal(discord.ui.Modal):
         embed.set_footer(text=f"Заполнено: {db[static]['created_at']}")
 
         if target:
-            await target.send(embed=embed, view=AnketaManageView(static))
+            await target.send(embed=embed)
             await interaction.response.send_message(
                 f"✅ Анкета отправлена в канал {target.mention}! Ожидай проверки.", ephemeral=True
             )
@@ -1617,7 +1617,7 @@ class AnketaModal(discord.ui.Modal):
                 ephemeral=True,
             )
             try:
-                await interaction.followup.send(embed=embed, view=AnketaManageView(static), ephemeral=True)
+                await interaction.followup.send(embed=embed, ephemeral=True)
             except Exception:
                 pass
 
