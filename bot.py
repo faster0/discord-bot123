@@ -1096,6 +1096,29 @@ async def on_message(message):
 
 
 @bot.event
+async def on_command_error(ctx, error):
+    # чтобы "не работает" было видно — показываем ошибку текстом
+    try:
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(f"❌ Не хватает аргумента: `{error.param.name}`")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.send(f"❌ Не понял аргумент. Пример: `!анкета #анкеты-база`")
+        elif isinstance(error, commands.CommandNotFound):
+            pass
+        else:
+            await ctx.send(f"❌ Ошибка команды: `{error}`")
+            print(f"[command error {ctx.command}]: {error}")
+    except Exception as e:
+        print(f"[on_command_error fail]: {e}")
+
+
+@bot.command(name="пинг")
+async def ping_cmd(ctx):
+    """Проверка что бот жив. Работает для всех, без прав."""
+    await ctx.send(f"🏓 Понг! Я на связи. Твои роли: {', '.join(r.name for r in ctx.author.roles)}")
+
+
+@bot.event
 async def on_ready():
     print(f"Бот {bot.user} успешно запущен!")
     # persistent-кнопки анкеты (чтобы работали после рестарта)
@@ -1693,7 +1716,10 @@ class AnketaManageView(discord.ui.View):
 async def anketa_panel(ctx, target: discord.TextChannel = None):
     """Поставить кнопку-базу. Пример: !анкета #анкеты-база"""
     if not is_officer(ctx):
-        return await ctx.send("❌ Только для Админ/Модератор.", delete_after=5)
+        roles = ", ".join(r.name for r in ctx.author.roles)
+        return await ctx.send(
+            f"❌ Только для Админ/Модератор.\nТвой ID: `{ctx.author.id}` (OWNER_ID в коде: `{OWNER_ID}`)\nТвои роли: {roles}\nДай себе роль **Админ** или поменяй OWNER_ID."
+        )
     # если указали канал — запоминаем как "другой чат куда летят данные"
     if target is not None:
         meta = load_activity_meta()
