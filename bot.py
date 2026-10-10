@@ -1310,6 +1310,7 @@ CONTRACT_LEVELS = [
     (250, "Контракт IV", "повышение"),
 ]
 ACTIVE_MIN_HOURS = 4  # от скольки часов сотрудник считается 🟢 Активным
+AUTO_BOARDS_ENABLED = False  # авто-рассылка досок в каналы ВЫКЛ — только по командам !активность / !контракты / !обновить-доски
 # --- Баллы за контракты (начисляются автоматом при ✅ Принять) ---
 # смысл: за каждую сданную единицу даём столько баллов
 # пример: 750 железной руды * 0.06 = 45 баллов
@@ -2188,7 +2189,11 @@ def track_voice_activity(member: discord.Member, before: discord.VoiceState, aft
 @tasks.loop(minutes=10)
 async def update_activity_boards():
     try:
+        # авто-доски выключены по умолчанию — шлём только вручную или если включили !автодоски вкл
         meta = load_activity_meta()
+        auto_on = meta.get("auto_boards", AUTO_BOARDS_ENABLED)
+        if not auto_on:
+            return
         for guild in bot.guilds:
             ch_act = find_channel_fuzzy(guild, ACTIVITY_CHANNEL_NAMES)
             if ch_act:
@@ -2355,6 +2360,67 @@ async def refresh_boards(ctx):
         meta[f"{ctx.guild.id}_contracts"] = msg2.id
     save_activity_meta(meta)
     await ctx.send(f"✅ Доски обновлены: {ch_act.mention if ch_act else '—'} {ch_con.mention if ch_con else '—'}")
+
+
+@bot.command(name="автодоски")
+async def auto_boards(ctx, режим: str = ""):
+    """!автодоски вкл / выкл — авто-рассылка досок в каналы (по умолчанию ВЫКЛ)."""
+    if not is_officer(ctx):
+        return await ctx.send("❌ Только для Админ/Модератор.", delete_after=5)
+    meta = load_activity_meta()
+    r = режим.lower().strip()
+    if r in ("вкл", "on", "1", "да"):
+        meta["auto_boards"] = True
+        save_activity_meta(meta)
+        return await ctx.send("✅ Авто-доски ВКЛ — бот будет сам обновлять каналы каждые 10 мин.")
+    if r in ("выкл", "off", "0", "нет"):
+        meta["auto_boards"] = False
+        save_activity_meta(meta)
+        return await ctx.send("✅ Авто-доски ВЫКЛ — бот больше сам ничего слать не будет. Только по `!активность` / `!контракты` / `!обновить-доски`.")
+    cur = meta.get("auto_boards", AUTO_BOARDS_ENABLED)
+    await ctx.send(f"ℹ️ Сейчас: **{'ВКЛ' if cur else 'ВЫКЛ'}**. Включить: `!автодоски вкл`, выключить: `!автодоски выкл`")
+
+
+@bot.command(name="убрать-доски")
+async def clear_boards(ctx):
+    """Удалить сообщения досок бота из каналов активности/контрактов."""
+    if not is_officer(ctx):
+        return await ctx.send("❌ Только для Админ/Модератор.", delete_after=5)
+    meta = load_activity_meta()
+    removed = 0
+    for key in (f"{ctx.guild.id}_activity", f"{ctx.guild.id}_contracts"):
+        mid = meta.pop(key, None)
+        if mid:
+            for ch in ctx.guild.text_channels:
+                try:
+                    msg = await ch.fetch_message(mid)
+                    if msg and msg.author == bot.user:
+                        await msg.delete()
+                        removed += 1
+                        break
+                except Exception:
+                    continue
+    # подчищаем последние сообщения бота в этих каналах
+    for names in (ACTIVITY_CHANNEL_NAMES, CONTRACTS_CHANNEL_NAMES):
+        ch = find_channel_fuzzy(ctx.guild, names)
+        if ch:
+            try:
+                async for m in ch.history(limit=10):
+                    if m.author == bot.user and m.embeds:
+                        try:
+                            await m.delete()
+                            removed += 1
+                        except Exception:
+                            pass
+                        break
+            except Exception:
+                pass
+    save_activity_meta(meta)
+    # и сразу выключаем авто-рассылку чтобы не прислал заново
+    meta = load_activity_meta()
+    meta["auto_boards"] = False
+    save_activity_meta(meta)
+    await ctx.send(f"✅ Убрал сообщений: {removed}. Авто-доски теперь ВЫКЛ.")
 
 
 @bot.command(name="сброс-сезона")
