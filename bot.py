@@ -57,8 +57,8 @@ ALL_DATA = {
         "⛏️ Медная руда": {"price": 210},
         "⛏️ Золотая руда": {"price": 420},
     },
-    "Поезд": {
-        "📦 Коробка с поезда": {"price": 865}
+    "Корабль": {
+        "📦 Коробка с корабля": {"price": 937.5}
     },
     "Ателье": {
         "👕 Закрытие Ателье": {"price": 1250}
@@ -1320,7 +1320,7 @@ CONTRACT_RATES_PATH = DATA_DIR / "contract_rates.json"
 DEFAULT_CONTRACT_RATES = {
     "Дары Моря": 0.2,        # 100 рыб = 20 баллов
     "Металлургия": 0.06,     # 750 руды = 45 баллов
-    "Поезд": 12.0,           # 1 коробка = 12 баллов
+    "Корабль": 12.0,         # 1 коробка с корабля = 12 баллов
     "Ателье": 18.0,          # 1 закрытие = 18 баллов
     "Активация контракта": 25.0,  # базовая за активацию
     # точечно для активаций (если надо разные):
@@ -1356,13 +1356,19 @@ def get_rate_for_item(item_name: str, category: str) -> float:
     rates = load_contract_rates()
     if category == "Активация контракта":
         return float(rates.get(f"Активация:{item_name}", rates.get("Активация контракта", 25.0)))
-    return float(rates.get(category, 0))
+    # старое название категории (до переименования Поезд -> Корабль)
+    if category == "Поезд":
+        category = "Корабль"
+    return float(rates.get(category, rates.get("Поезд", 0)))
 
 
 def find_category_for_item(item_name: str):
     for cat, items in ALL_DATA.items():
         if item_name in items:
             return cat
+    # старые названия из отчётов до переименования (Поезд -> Корабль)
+    if item_name in ("📦 Коробка с поезда",):
+        return "Корабль"
     return None
 
 
@@ -2121,8 +2127,9 @@ class ActivityPagesView(discord.ui.View):
                 voice_mark = " 🎙️" if r.get("in_voice") else ""
                 left_mark = " (вышел)" if r.get("left") else ""
                 if r["was"]:
+                    act = "🟢" if r["hours"] >= ACTIVE_MIN_HOURS else "🔴"
                     lines.append(
-                        f"**{i}.** {r['display']}{left_mark}{voice_mark} — **{fmt_hm(r['hours'])}** ({int(r['hours']*60)} мин) — **{r['points']}** баллов — {r['roman']} — {fmt_progress(r['points'])}"
+                        f"**{i}.** {act} {r['display']}{left_mark}{voice_mark} — **{fmt_hm(r['hours'])}** ({int(r['hours']*60)} мин) — **{r['points']}** баллов — {r['roman']} — {fmt_progress(r['points'])}"
                     )
                 else:
                     lines.append(f"**{i}.** {r['display']} — 0 мин — 🔴 не заходил")
@@ -2556,7 +2563,7 @@ async def show_rates(ctx):
     e = discord.Embed(title="💰 Баллы за контракты", description="Начисляются автоматом при ✅ Принять", color=discord.Color.gold())
     e.add_field(name="🐟 Дары Моря", value=f"`{rates.get('Дары Моря')}` за 1 шт.\n100 рыб = {int(100*float(rates.get('Дары Моря',0)))} баллов", inline=True)
     e.add_field(name="⛏️ Металлургия", value=f"`{rates.get('Металлургия')}` за 1 руду\n750 руды = {int(750*float(rates.get('Металлургия',0)))} баллов", inline=True)
-    e.add_field(name="📦 Поезд", value=f"`{rates.get('Поезд')}` за коробку", inline=True)
+    e.add_field(name="🚢 Корабль", value=f"`{rates.get('Корабль', rates.get('Поезд'))}` за коробку", inline=True)
     e.add_field(name="👕 Ателье", value=f"`{rates.get('Ателье')}` за закрытие", inline=True)
     e.add_field(name="⚡ Активация", value=f"база `{rates.get('Активация контракта')}`\nМеталлургия: `{rates.get('Активация:⚡ Металлургия')}`\nПоезд: `{rates.get('Активация:⚡ Поезд')}`\nАтелье: `{rates.get('Активация:⚡ Ателье')}`", inline=False)
     e.set_footer(text='Менять: !ставка "Дары Моря" 0.3  |  !ставка Металлургия 0.08')
