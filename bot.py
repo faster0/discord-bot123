@@ -1326,7 +1326,6 @@ DEFAULT_CONTRACT_RATES = {
     # точечно для активаций (если надо разные):
     "Активация:⚡ Металлургия": 30.0,
     "Активация:⚡ Корабль": 25.0,
-    "Активация:⚡ Поезд": 25.0,
     "Активация:⚡ Ателье": 20.0,
 }
 # =========================================
@@ -1357,21 +1356,13 @@ def get_rate_for_item(item_name: str, category: str) -> float:
     rates = load_contract_rates()
     if category == "Активация контракта":
         return float(rates.get(f"Активация:{item_name}", rates.get("Активация контракта", 25.0)))
-    # старое название категории (до переименования Поезд -> Корабль)
-    if category == "Поезд":
-        category = "Корабль"
-    return float(rates.get(category, rates.get("Поезд", 0)))
+    return float(rates.get(category, 0))
 
 
 def find_category_for_item(item_name: str):
     for cat, items in ALL_DATA.items():
         if item_name in items:
             return cat
-    # старые названия из отчётов до переименования (Поезд -> Корабль)
-    if item_name in ("📦 Коробка с поезда",):
-        return "Корабль"
-    if item_name == "⚡ Поезд":
-        return "Активация контракта"
     return None
 
 
@@ -2566,7 +2557,7 @@ async def show_rates(ctx):
     e = discord.Embed(title="💰 Баллы за контракты", description="Начисляются автоматом при ✅ Принять", color=discord.Color.gold())
     e.add_field(name="🐟 Дары Моря", value=f"`{rates.get('Дары Моря')}` за 1 шт.\n100 рыб = {int(100*float(rates.get('Дары Моря',0)))} баллов", inline=True)
     e.add_field(name="⛏️ Металлургия", value=f"`{rates.get('Металлургия')}` за 1 руду\n750 руды = {int(750*float(rates.get('Металлургия',0)))} баллов", inline=True)
-    e.add_field(name="🚢 Корабль", value=f"`{rates.get('Корабль', rates.get('Поезд'))}` за коробку", inline=True)
+    e.add_field(name="🚢 Корабль", value=f"`{rates.get('Корабль')}` за коробку", inline=True)
     e.add_field(name="👕 Ателье", value=f"`{rates.get('Ателье')}` за закрытие", inline=True)
     e.add_field(name="⚡ Активация", value=f"база `{rates.get('Активация контракта')}`\nМеталлургия: `{rates.get('Активация:⚡ Металлургия')}`\nКорабль: `{rates.get('Активация:⚡ Корабль')}`\nАтелье: `{rates.get('Активация:⚡ Ателье')}`", inline=False)
     e.set_footer(text='Менять: !ставка "Дары Моря" 0.3  |  !ставка Металлургия 0.08')
