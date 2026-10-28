@@ -1,7 +1,9 @@
 from datetime import datetime, timezone, timedelta
 import json
 import os
+import sys
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 import discord
@@ -284,6 +286,8 @@ class ReportManagementView(discord.ui.View):
                     adb[worker_id].setdefault("history", []).append(
                         f"{datetime.now(MSK).strftime('%d.%m %H:%M')} — контракт +{fmt_points(awarded)} от {interaction.user.mention}"
                     )
+                    # не даём истории расти бесконечно (иначе файл/память пухнут и бот падает)
+                    adb[worker_id]["history"] = adb[worker_id]["history"][-50:]
                     save_activity(adb)
                 except Exception as e:
                     print(f"[award contract points err]: {e}")
@@ -1118,6 +1122,53 @@ async def ping_cmd(ctx):
     await ctx.send(f"🏓 Понг! Я на связи. Твои роли: {', '.join(r.name for r in ctx.author.roles)}")
 
 
+# --- Сторожевой таймер: не даём боту «зависнуть» мёртвым ---
+# На Bothost/Render процесс иногда остаётся живым, но соединение с Discord
+# умирает и панель его не перезапускает. Тогда сами выходим, чтобы хостинг
+# поднял бота заново.
+_watchdog_bad_since = None
+
+
+@tasks.loop(minutes=1)
+async def connection_watchdog():
+    global _watchdog_bad_since
+    try:
+        ok = bot.is_ready() and not bot.is_closed() and bot.latency < 60
+    except Exception:
+        ok = False
+    if ok:
+        if _watchdog_bad_since is not None:
+            print("[watchdog] связь восстановлена")
+        _watchdog_bad_since = None
+        return
+    if _watchdog_bad_since is None:
+        _watchdog_bad_since = time.time()
+        print("[watchdog] нет связи с Discord — жду 5 минут")
+        return
+    if time.time() - _watchdog_bad_since > 300:
+        print("[watchdog] 5 минут без связи — принудительный выход для перезапуска")
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os._exit(1)
+
+
+@connection_watchdog.before_loop
+async def _before_watchdog():
+    await bot.wait_until_ready()
+
+
+@bot.event
+async def on_disconnect():
+    print("[discord] соединение потеряно, переподключаюсь…")
+
+
+@bot.event
+async def on_resumed():
+    print("[discord] соединение восстановлено")
+
+
 @bot.event
 async def on_ready():
     print(f"Бот {bot.user} успешно запущен!")
@@ -1136,6 +1187,9 @@ async def on_ready():
     # доски активности
     if not update_activity_boards.is_running():
         update_activity_boards.start()
+    # сторожевой таймер соединения
+    if not connection_watchdog.is_running():
+        connection_watchdog.start()
     # подхватываем тех, кто уже сидит в войсе на момент рестарта
     try:
         now_ts = datetime.now(MSK).timestamp()
@@ -2793,16 +2847,34 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         return
 
 
+class KeepAliveHTTPServer(HTTPServer):
+    # чтобы после рестарта порт освобождался сразу, а не падал с "address already in use"
+    allow_reuse_address = True
+
+
 def start_keep_alive():
     port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+    server = KeepAliveHTTPServer(("0.0.0.0", port), KeepAliveHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"Keep-alive server запущен на порту {port}")
 
 
+def log_crash(exc_type, exc, tb):
+    """Пишем падение в crash.log рядом с данными — чтобы было видно причину."""
+    try:
+        import traceback
+        with open(DATA_DIR / "crash.log", "a", encoding="utf-8") as f:
+            f.write(f"\n=== {datetime.now(MSK).strftime('%d.%m.%Y %H:%M:%S')} ===\n")
+            traceback.print_exception(exc_type, exc, tb, file=f)
+    except Exception:
+        pass
+    sys.__excepthook__(exc_type, exc, tb)
+
+
 if __name__ == "__main__":
-    start_keep_alive()
+    sys.excepthook = log_crash
+
     # Bothost даёт токен в DISCORD_BOT_TOKEN (или BOT_TOKEN), Render - в DISCORD_TOKEN.
     # Поддерживаем все варианты, чтобы работало везде.
     TOKEN = (
@@ -2816,4 +2888,27 @@ if __name__ == "__main__":
             "а на Bothost укажи токен в поле Bot Token (он придёт как DISCORD_BOT_TOKEN). "
             "Локально можно создать .env или выполнить set DISCORD_TOKEN=xxx"
         )
-    bot.run(TOKEN)
+
+    # Keep-alive нужен только Render (Web Service). На Bothost порт не требуется,
+    # и если он занят — бот раньше падал ДО подключения к Discord.
+    if os.getenv("RENDER") or os.getenv("PORT"):
+        try:
+            start_keep_alive()
+        except Exception as e:
+            print(f"[keep-alive] не запустился (не критично): {type(e).__name__}: {e}")
+
+    try:
+        bot.run(TOKEN)
+    except discord.LoginFailure:
+        print("❌ Неверный токен бота. Проверь DISCORD_TOKEN / Bot Token в настройках хостинга.")
+    except discord.PrivilegedIntentsRequired:
+        print(
+            "❌ В Discord Developer Portal не включены привилегированные интенты.\n"
+            "   Включи: MESSAGE CONTENT INTENT, SERVER MEMBERS INTENT, PRESENCE INTENT."
+        )
+    except KeyboardInterrupt:
+        print("Бот остановлен вручную.")
+    except Exception as e:
+        log_crash(type(e), e, e.__traceback__)
+        print(f"❌ Бот упал: {type(e).__name__}: {e}")
+        raise
