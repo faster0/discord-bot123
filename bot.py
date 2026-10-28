@@ -1126,6 +1126,7 @@ async def on_ready():
         bot.add_view(AnketaPanelView())
         bot.add_view(AnketaManageView(static=""))
         bot.add_view(MyStatsView())
+        bot.add_view(PointsHubView())
     except Exception as e:
         print(f"[add_view anketa]: {e}")
     if not check_contraband_reminders.is_running():
@@ -2425,33 +2426,89 @@ async def show_contracts(ctx):
     await ctx.send(embed=view.make_embed(), view=view)
 
 
-@bot.command(name="баллы-всех", aliases=["топ", "рейтинг"])
+@bot.command(name="баллы-всех", aliases=["топ", "рейтинг", "баланс"])
 async def show_all_points(ctx):
-    """!баллы-всех — показать, сколько баллов у каждого (по убыванию)."""
+    """!баллы-всех — таблица баллов + кнопки (мои / топ / как считаются)."""
+    await ctx.send(embed=build_points_list_embed(), view=PointsHubView())
+
+
+def collect_points_rows():
+    """(ник, всего, контракты, вручную, войс) — только у кого > 0, по убыванию."""
     db = load_activity()
-    if not db:
-        return await ctx.send("Пока ни у кого нет баллов.")
     rows = []
     for v in db.values():
+        p = entry_points(v)
+        if p <= 0:
+            continue
         rows.append((
             v.get("nick") or "?",
-            entry_points(v),
+            p,
             float(v.get("contract_points", 0) or 0),
             float(v.get("manual_points", 0) or 0),
             entry_voice_points(v),
         ))
     rows.sort(key=lambda x: x[1], reverse=True)
-    rows = [r for r in rows if r[1] > 0]
+    return rows, len(db)
+
+
+def build_points_list_embed() -> discord.Embed:
+    """Публичная таблица: топ-10 с полной расшифровкой баллов."""
+    rows, people = collect_points_rows()
+    e = discord.Embed(title="⭐ БАЛЛЫ ВСЕХ", color=discord.Color.gold())
     if not rows:
-        return await ctx.send("⭐ У всех **0** баллов.")
-    lines = [
-        f"**{i}.** {n} — **{fmt_points(p)}** б. (контракты {fmt_points(c)} + войс {vo} + вручную {fmt_points(m)})"
-        for i, (n, p, c, m, vo) in enumerate(rows, start=1)
-    ]
+        e.description = (
+            "Пока ни у кого нет баллов.\n\n"
+            "Нажми **⭐ Мои баллы** — покажу лично тебе.\n"
+            "**📋 Топ всех** — полный список с расшифровкой.\n"
+            "**💰 Как считаются** — откуда берутся баллы."
+        )
+        return e
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (n, p, c, m, vo) in enumerate(rows[:10], start=1):
+        head = medals[i - 1] if i <= 3 else f"**{i}.**"
+        lines.append(
+            f"{head} {n} — **{fmt_points(p)}** б.\n"
+            f"　└ контракты `{fmt_points(c)}` • войс `{vo}` • вручную `{fmt_points(m)}`"
+        )
     total = round(sum(r[1] for r in rows), 2)
-    footer = f"Людей с баллами: {len(rows)} • Сумма: {fmt_points(total)} • 10 на странице ◀ ▶"
-    view = SimplePagesView("⭐ Баллы всех", lines, per_page=10, footer=footer)
-    await ctx.send(embed=view.make_embed(), view=view)
+    e.description = "\n".join(lines)
+    e.set_footer(text=f"С баллами: {len(rows)} из {people} • Сумма: {fmt_points(total)} • Полный список — кнопка «Топ всех»")
+    return e
+
+
+class PointsHubView(discord.ui.View):
+    """Кнопки баллов: свои (только тебе), все, как считаются."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Мои баллы", emoji="⭐", style=discord.ButtonStyle.primary, custom_id="points_mine")
+    async def mine(self, interaction: discord.Interaction, button: discord.ui.Button):
+        e = build_stats_embed_for(interaction.user, interaction.user.display_name)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="Топ всех", emoji="📋", style=discord.ButtonStyle.success, custom_id="points_all")
+    async def all_people(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows, _people = collect_points_rows()
+        if not rows:
+            return await interaction.response.send_message("⭐ Пока ни у кого нет баллов.", ephemeral=True)
+        lines = [
+            f"**{i}.** {n} — **{fmt_points(p)}** б. (контракты {fmt_points(c)} + войс {vo} + вручную {fmt_points(m)})"
+            for i, (n, p, c, m, vo) in enumerate(rows, start=1)
+        ]
+        total = round(sum(r[1] for r in rows), 2)
+        view = SimplePagesView(
+            "⭐ Баллы всех",
+            lines,
+            per_page=10,
+            footer=f"Людей с баллами: {len(rows)} • Сумма: {fmt_points(total)} • 10 на странице ◀ ▶",
+        )
+        await interaction.response.send_message(embed=view.make_embed(), view=view, ephemeral=True)
+
+    @discord.ui.button(label="Как считаются", emoji="💰", style=discord.ButtonStyle.secondary, custom_id="points_rates")
+    async def how(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=build_rates_embed(), ephemeral=True)
 
 
 @bot.command(name="обнулить-баллы", aliases=["сброс-баллов", "обнулитьбаллы"])
@@ -2670,22 +2727,36 @@ async def reset_season(ctx):
     await ctx.send("✅ Сезон сброшен: часы и баллы обнулены.")
 
 
+def build_rates_embed() -> discord.Embed:
+    """Понятная таблица: сколько чего сдать на 1 балл."""
+    rates = load_contract_rates()
+    e = discord.Embed(
+        title="💰 Как считаются баллы",
+        description=(
+            "Баллы **дробные**: сдал меньше нормы — получишь пропорционально.\n"
+            "Начисляются автоматом при **✅ Принять** отчёт.\n"
+            f"Баллы за войс: **1 балл за каждые {int(VOICE_SECONDS_PER_POINT // 3600)} ч**."
+        ),
+        color=discord.Color.gold(),
+    )
+    e.add_field(name="🐟 Дары Моря", value=f"**{points_threshold_text(rates.get('Дары Моря'))}**\nнапр. 50 шт = {fmt_points(50 * float(rates.get('Дары Моря', 0)))} б.", inline=True)
+    e.add_field(name="👕 Ателье", value=f"**{points_threshold_text(rates.get('Ателье'))}**\nнапр. 30 = {fmt_points(30 * float(rates.get('Ателье', 0)))} б.", inline=True)
+    e.add_field(name="📦 Корабль", value=f"**{points_threshold_text(rates.get('Корабль'))}**\nнапр. 60 = {fmt_points(60 * float(rates.get('Корабль', 0)))} б.", inline=True)
+    e.add_field(name="⛏️ Металлургия", value=f"`{rates.get('Металлургия')}` за 1 руду\n750 = {fmt_points(750 * float(rates.get('Металлургия', 0)))} б.", inline=True)
+    e.add_field(name="⚡ Активация", value=f"база `{rates.get('Активация контракта')}`\nМеталлургия: `{rates.get('Активация:⚡ Металлургия')}`\nКорабль: `{rates.get('Активация:⚡ Корабль')}`\nАтелье: `{rates.get('Активация:⚡ Ателье')}`", inline=False)
+    e.add_field(
+        name="📜 Контракты (порог баллов)",
+        value=" / ".join(f"{n}={need}" for need, n, _r in sorted(CONTRACT_LEVELS)),
+        inline=False,
+    )
+    e.set_footer(text='Менять: !ставка "Дары Моря" 0.04  |  !ставка Ателье 0.0667  |  !ставка Корабль 0.0333')
+    return e
+
+
 @bot.command(name="ставки")
 async def show_rates(ctx):
     """Показать сколько баллов даётся за контракты."""
-    rates = load_contract_rates()
-    e = discord.Embed(
-        title="💰 Баллы за контракты",
-        description="Начисляются автоматом при ✅ Принять.\nБаллы дробные: сдал меньше нормы — получишь пропорционально.",
-        color=discord.Color.gold(),
-    )
-    e.add_field(name="🐟 Дары Моря", value=f"**{points_threshold_text(rates.get('Дары Моря'))}**", inline=True)
-    e.add_field(name="👕 Ателье", value=f"**{points_threshold_text(rates.get('Ателье'))}**", inline=True)
-    e.add_field(name="📦 Корабль", value=f"**{points_threshold_text(rates.get('Корабль'))}**", inline=True)
-    e.add_field(name="⛏️ Металлургия", value=f"`{rates.get('Металлургия')}` за 1 руду\n750 руды = {fmt_points(750*float(rates.get('Металлургия',0)))} баллов", inline=True)
-    e.add_field(name="⚡ Активация", value=f"база `{rates.get('Активация контракта')}`\nМеталлургия: `{rates.get('Активация:⚡ Металлургия')}`\nКорабль: `{rates.get('Активация:⚡ Корабль')}`\nАтелье: `{rates.get('Активация:⚡ Ателье')}`", inline=False)
-    e.set_footer(text='Менять: !ставка "Дары Моря" 0.04  |  !ставка Ателье 0.0667  |  !ставка Корабль 0.0333')
-    await ctx.send(embed=e)
+    await ctx.send(embed=build_rates_embed())
 
 
 @bot.command(name="ставка")
