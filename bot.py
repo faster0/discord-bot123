@@ -260,7 +260,7 @@ class ReportManagementView(discord.ui.View):
             if f.name == "Элементы":
                 item_lines = (f.value or "").split("\n")
                 break
-        awarded = 0
+        awarded = 0.0
         details = ""
         if worker_id and item_lines:
             awarded, details = calc_contract_points(item_lines)
@@ -280,9 +280,9 @@ class ReportManagementView(discord.ui.View):
                                           "seconds": 0, "manual_hours": 0.0, "manual_points": 0,
                                           "contract_points": 0, "history": []}
                     adb[worker_id].setdefault("contract_points", 0)
-                    adb[worker_id]["contract_points"] = int(adb[worker_id]["contract_points"]) + awarded
+                    adb[worker_id]["contract_points"] = round(float(adb[worker_id]["contract_points"]) + awarded, 2)
                     adb[worker_id].setdefault("history", []).append(
-                        f"{datetime.now(MSK).strftime('%d.%m %H:%M')} — контракт +{awarded} от {interaction.user.mention}"
+                        f"{datetime.now(MSK).strftime('%d.%m %H:%M')} — контракт +{fmt_points(awarded)} от {interaction.user.mention}"
                     )
                     save_activity(adb)
                 except Exception as e:
@@ -304,7 +304,7 @@ class ReportManagementView(discord.ui.View):
             roman, _cname = get_contract(total_now)
             embed.add_field(
                 name="⭐ Баллы",
-                value=f"+{awarded} баллов {worker_mention} (всего **{total_now}**, контракт **{roman}** — {fmt_progress(total_now)})",
+                value=f"+{fmt_points(awarded)} баллов {worker_mention} (всего **{fmt_points(total_now)}**, контракт **{roman}** — {fmt_progress(total_now)})",
                 inline=False,
             )
         elif worker_id:
@@ -1317,11 +1317,19 @@ AUTO_BOARDS_ENABLED = False  # авто-рассылка досок в кана�
 # смысл: за каждую сданную единицу даём столько баллов
 # пример: 750 железной руды * 0.06 = 45 баллов
 CONTRACT_RATES_PATH = DATA_DIR / "contract_rates.json"
+# Версия формата ставок. Если в файле лежит старая версия — ставки сбрасываются
+# на новые пороги (иначе старые значения перекрыли бы новую систему баллов).
+CONTRACT_RATES_VERSION = 2
+# Ставка = сколько баллов даётся за 1 единицу (шт/кг).
+# Баллы дробные и считаются ПРОПОРЦИОНАЛЬНО (сдал меньше — получишь часть балла).
+#   Рыба:    1/25 -> 25 = 1 балл
+#   Ателье:  1/15 -> 15 = 1 балл
+#   Корабль: 1/30 -> 30 коробок = 1 балл
 DEFAULT_CONTRACT_RATES = {
-    "Дары Моря": 0.2,        # 100 рыб = 20 баллов
-    "Металлургия": 0.06,     # 750 руды = 45 баллов
-    "Корабль": 12.0,         # 1 коробка с корабля = 12 баллов
-    "Ателье": 18.0,          # 1 закрытие = 18 баллов
+    "Дары Моря": 1 / 25,        # 25 рыбы = 1 балл
+    "Металлургия": 0.06,        # 750 руды = 45 баллов
+    "Корабль": 1 / 30,          # 30 коробок = 1 балл
+    "Ателье": 1 / 15,           # 15 = 1 балл
     "Активация контракта": 25.0,  # базовая за активацию
     # точечно для активаций (если надо разные):
     "Активация:⚡ Металлургия": 30.0,
@@ -1335,9 +1343,14 @@ def load_contract_rates():
     try:
         if CONTRACT_RATES_PATH.exists():
             data = json.loads(CONTRACT_RATES_PATH.read_text(encoding="utf-8"))
+            if int(data.get("_version", 1)) < CONTRACT_RATES_VERSION:
+                # старый формат (баллы за штуку вместо порогов) — сбрасываем на новые пороги
+                print("[contract_rates] старые ставки -> применяю новые пороги")
+                save_contract_rates(dict(DEFAULT_CONTRACT_RATES))
+                return dict(DEFAULT_CONTRACT_RATES)
             # подмешиваем дефолты чтобы новые категории не терялись
             merged = dict(DEFAULT_CONTRACT_RATES)
-            merged.update(data)
+            merged.update({k: v for k, v in data.items() if not str(k).startswith("_")})
             return merged
     except Exception as e:
         print(f"[Ошибка чтения contract_rates.json]: {e}")
@@ -1347,7 +1360,9 @@ def load_contract_rates():
 def save_contract_rates(data):
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        CONTRACT_RATES_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = {k: v for k, v in data.items() if not str(k).startswith("_")}
+        payload["_version"] = CONTRACT_RATES_VERSION
+        CONTRACT_RATES_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
         print(f"[Ошибка записи contract_rates.json]: {e}")
 
@@ -1359,6 +1374,30 @@ def get_rate_for_item(item_name: str, category: str) -> float:
     return float(rates.get(category, 0))
 
 
+def fmt_points(value) -> str:
+    """Красивый вывод баллов: 3 -> '3', 1.46 -> '1.46', 0.5 -> '0.5'."""
+    try:
+        v = round(float(value), 2)
+    except Exception:
+        return "0"
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def points_threshold_text(rate) -> str:
+    """Ставку вида 1/25 превращает в читаемое '25 шт = 1 балл'."""
+    try:
+        rate = float(rate)
+    except Exception:
+        return "—"
+    if rate <= 0:
+        return "—"
+    if rate >= 1:
+        return f"1 шт = {fmt_points(rate)} баллов"
+    return f"{fmt_points(1 / rate)} шт = 1 балл"
+
+
 def find_category_for_item(item_name: str):
     for cat, items in ALL_DATA.items():
         if item_name in items:
@@ -1368,7 +1407,8 @@ def find_category_for_item(item_name: str):
 
 def calc_contract_points(item_lines: list) -> tuple:
     """Считает баллы по строкам 'Предмет — N шт. (Сумма: ...)'.
-    Возвращает (total_points:int, details:str)."""
+    Баллы дробные и пропорциональные (25 рыбы = 1 балл, 15 ателье = 1 балл,
+    30 коробок = 1 балл). Возвращает (total_points: float, details: str)."""
     total = 0.0
     det = []
     for line in item_lines:
@@ -1377,17 +1417,17 @@ def calc_contract_points(item_lines: list) -> tuple:
                 continue
             item_part, rest = line.split(" — ", 1)
             item_part = item_part.strip()
-            qty = int(rest.strip().split()[0])
+            qty = float(rest.strip().split()[0].replace(",", "."))
             cat = find_category_for_item(item_part)
             if not cat:
                 continue
             rate = get_rate_for_item(item_part, cat)
             pts = qty * rate
             total += pts
-            det.append(f"{item_part} x{qty} = {round(pts,1)}")
+            det.append(f"{item_part} x{fmt_points(qty)} = {fmt_points(pts)}")
         except Exception:
             continue
-    return int(round(total)), "; ".join(det)
+    return round(total, 2), "; ".join(det)
 
 
 def load_family():
@@ -1861,11 +1901,21 @@ def entry_voice_points(entry: dict) -> int:
         total_sec = int(entry.get("seconds", 0)) + int(float(entry.get("manual_hours", 0)) * 3600)
     except Exception:
         total_sec = int(entry.get("seconds", 0))
+    # если баллы обнуляли — войс-баллы считаем только с момента обнуления
+    try:
+        total_sec = max(0, total_sec - int(entry.get("points_offset_sec", 0) or 0))
+    except Exception:
+        pass
     return total_sec // VOICE_SECONDS_PER_POINT
 
 
-def entry_points(entry: dict) -> int:
-    return entry_voice_points(entry) + int(entry.get("manual_points", 0)) + int(entry.get("contract_points", 0))
+def entry_points(entry: dict) -> float:
+    return round(
+        entry_voice_points(entry)
+        + float(entry.get("manual_points", 0))
+        + float(entry.get("contract_points", 0)),
+        2,
+    )
 
 
 def fmt_hm(hours: float = None, seconds: int = None) -> str:
@@ -1916,7 +1966,7 @@ def fmt_progress(points: int) -> str:
     nxt, need, miss = get_next_contract(points)
     if nxt is None:
         return "MAX 🏆"
-    return f"до {nxt}: надо {need}, не хватает {miss}"
+    return f"до {nxt}: надо {need}, не хватает {fmt_points(miss)}"
 
 
 def find_activity_key(db: dict, ident: str):
@@ -1962,12 +2012,12 @@ def build_activity_embed():
         color=discord.Color.green(),
     )
     if active:
-        txt = "\n".join(f"{i+1}. {n} — {fmt_hm(h)} ({int(h*60)} мин) — {p} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(active[:15]))
+        txt = "\n".join(f"{i+1}. {n} — {fmt_hm(h)} ({int(h*60)} мин) — {fmt_points(p)} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(active[:15]))
         e.add_field(name="🟢 АКТИВНЫЕ", value=txt, inline=False)
     else:
         e.add_field(name="🟢 АКТИВНЫЕ", value="Пока никого", inline=False)
     if inactive:
-        txt2 = "\n".join(f"{i+1}. {n} — {fmt_hm(h)} ({int(h*60)} мин) — {p} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(inactive[:15]))
+        txt2 = "\n".join(f"{i+1}. {n} — {fmt_hm(h)} ({int(h*60)} мин) — {fmt_points(p)} баллов — {fmt_progress(p)}" for i, (n, h, p, _r, _v) in enumerate(inactive[:15]))
         e.add_field(name="🔴 НЕАКТИВНЫЕ", value=txt2, inline=False)
     else:
         e.add_field(name="🔴 НЕАКТИВНЫЕ", value="—", inline=False)
@@ -2002,8 +2052,8 @@ def build_contracts_embed():
             if nxt is None:
                 prog = "MAX"
             else:
-                prog = f"надо {need}, не хватает {miss}"
-            lines.append(f"**{n}** | {fmt_hm(h)} | {p} | {roman} | {prog} | {st}")
+                prog = f"надо {need}, не хватает {fmt_points(miss)}"
+            lines.append(f"**{n}** | {fmt_hm(h)} | {fmt_points(p)} | {roman} | {prog} | {st}")
         e.add_field(name=f"Всего: {len(rows)}", value="\n".join(lines), inline=False)
     e.set_footer(text=f"Контракты: {' / '.join(f'{n}={need}' for need, n, _r in sorted(CONTRACT_LEVELS))}")
     return e
@@ -2063,7 +2113,7 @@ def build_activity_rows(guild: discord.Guild):
         in_voice = m.voice is not None and m.voice.channel is not None
         was = hours > 0 or points > 0 or in_voice or (uid in db)
         # был ли хоть раз: если есть запись с секундами/часами/баллами — был
-        ever = (base_sec >= 60) or float(entry.get("manual_hours", 0)) > 0 or int(entry.get("manual_points", 0)) != 0 or int(entry.get("contract_points", 0)) != 0 or in_voice
+        ever = (base_sec >= 60) or float(entry.get("manual_hours", 0)) > 0 or int(entry.get("manual_points", 0)) != 0 or float(entry.get("contract_points", 0)) != 0 or in_voice
         rows.append({
             "display": m.display_name, "mention": m.mention, "id": uid,
             "hours": hours, "points": points, "roman": roman,
@@ -2123,7 +2173,7 @@ class ActivityPagesView(discord.ui.View):
                 if r["was"]:
                     act = "🟢" if r["hours"] >= ACTIVE_MIN_HOURS else "🔴"
                     lines.append(
-                        f"**{i}.** {act} {r['display']}{left_mark}{voice_mark} — **{fmt_hm(r['hours'])}** ({int(r['hours']*60)} мин) — **{r['points']}** баллов — {r['roman']} — {fmt_progress(r['points'])}"
+                        f"**{i}.** {act} {r['display']}{left_mark}{voice_mark} — **{fmt_hm(r['hours'])}** ({int(r['hours']*60)} мин) — **{fmt_points(r['points'])}** баллов — {r['roman']} — {fmt_progress(r['points'])}"
                     )
                 else:
                     lines.append(f"**{i}.** {r['display']} — 0 мин — 🔴 не заходил")
@@ -2162,12 +2212,13 @@ class ActivityPagesView(discord.ui.View):
 class SimplePagesView(discord.ui.View):
     """Универсальная листалка по 10 строк: для !анкеты и !контракты."""
 
-    def __init__(self, title: str, lines: list, per_page: int = 10):
+    def __init__(self, title: str, lines: list, per_page: int = 10, footer: str = None):
         super().__init__(timeout=180)
         self.title = title
         self.lines = lines
         self.per_page = per_page
         self.page = 0
+        self.footer = footer or "10 на странице • Листай стрелками ◀ ▶"
         self.total_pages = max(1, (len(lines) + per_page - 1) // per_page)
 
     def make_embed(self) -> discord.Embed:
@@ -2179,7 +2230,7 @@ class SimplePagesView(discord.ui.View):
             text = text[:4000] + "…"
         # Discord description лимит 4096 — ок, lines по 10 шт влезут
         e.description = text
-        e.set_footer(text="10 на странице • Листай стрелками ◀ ▶")
+        e.set_footer(text=self.footer)
         return e
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
@@ -2316,7 +2367,7 @@ async def add_points(ctx, ident: str, amount: int, *, причина: str = ""):
     total = entry_points(db[key])
     roman, cname = get_contract(total)
     await ctx.send(
-        f"✅ {db[key].get('nick')} — {'+' if amount>=0 else ''}{amount} баллов (всего **{total}**, контракт **{roman}** — {fmt_progress(total)})"
+        f"✅ {db[key].get('nick')} — {'+' if amount>=0 else ''}{amount} баллов (всего **{fmt_points(total)}**, контракт **{roman}** — {fmt_progress(total)})"
     )
 
 
@@ -2331,7 +2382,7 @@ async def add_hours(ctx, ident: str, hours: float):
         return await ctx.send(f"❌ Не нашёл `{ident}`.", delete_after=10)
     db[key]["manual_hours"] = round(float(db[key].get("manual_hours", 0)) + hours, 2)
     save_activity(db)
-    await ctx.send(f"✅ {db[key].get('nick')} — +{hours} ч. (всего **{entry_hours(db[key])} ч.**, баллов **{entry_points(db[key])}**)")
+    await ctx.send(f"✅ {db[key].get('nick')} — +{hours} ч. (всего **{entry_hours(db[key])} ч.**, баллов **{fmt_points(entry_points(db[key]))}**)")
 
 
 @bot.command(name="привязать")
@@ -2367,11 +2418,80 @@ async def show_contracts(ctx):
         rows.append((v.get("nick", "?"), h, p, roman))
     rows.sort(key=lambda x: x[2], reverse=True)
     for i, (n, h, p, roman) in enumerate(rows, start=1):
-        lines.append(f"**{i}.** {n} | {fmt_hm(h)} ({int(h*60)} мин) | {p} | {roman} | {fmt_progress(p)}")
+        lines.append(f"**{i}.** {n} | {fmt_hm(h)} ({int(h*60)} мин) | {fmt_points(p)} | {roman} | {fmt_progress(p)}")
     if not lines:
         lines = ["Пока пусто. Зайдите в войс — часы начнут капать."]
     view = SimplePagesView(f"📑 Контракты ({len(rows)})", lines, per_page=10)
     await ctx.send(embed=view.make_embed(), view=view)
+
+
+@bot.command(name="баллы-всех", aliases=["топ", "рейтинг"])
+async def show_all_points(ctx):
+    """!баллы-всех — показать, сколько баллов у каждого (по убыванию)."""
+    db = load_activity()
+    if not db:
+        return await ctx.send("Пока ни у кого нет баллов.")
+    rows = []
+    for v in db.values():
+        rows.append((
+            v.get("nick") or "?",
+            entry_points(v),
+            float(v.get("contract_points", 0) or 0),
+            float(v.get("manual_points", 0) or 0),
+            entry_voice_points(v),
+        ))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    rows = [r for r in rows if r[1] > 0]
+    if not rows:
+        return await ctx.send("⭐ У всех **0** баллов.")
+    lines = [
+        f"**{i}.** {n} — **{fmt_points(p)}** б. (контракты {fmt_points(c)} + войс {vo} + вручную {fmt_points(m)})"
+        for i, (n, p, c, m, vo) in enumerate(rows, start=1)
+    ]
+    total = round(sum(r[1] for r in rows), 2)
+    footer = f"Людей с баллами: {len(rows)} • Сумма: {fmt_points(total)} • 10 на странице ◀ ▶"
+    view = SimplePagesView("⭐ Баллы всех", lines, per_page=10, footer=footer)
+    await ctx.send(embed=view.make_embed(), view=view)
+
+
+@bot.command(name="обнулить-баллы", aliases=["сброс-баллов", "обнулитьбаллы"])
+async def reset_all_points(ctx, confirm: str = ""):
+    """!обнулить-баллы да — обнулить баллы у всех (часы в войсе сохраняются)."""
+    if ctx.author.id != OWNER_ID and not ctx.author.guild_permissions.administrator:
+        return await ctx.send("❌ Только для владельца/администратора.", delete_after=5)
+    db = load_activity()
+    if not db:
+        return await ctx.send("База пуста — обнулять нечего.")
+    if confirm.strip().lower() not in ("да", "yes", "+", "подтверждаю"):
+        rows = sorted(
+            ((v.get("nick") or "?", entry_points(v)) for v in db.values()),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        top = "\n".join(f"• {n} — {fmt_points(p)}" for n, p in rows[:5]) or "—"
+        return await ctx.send(
+            "⚠️ **Обнуление баллов у всех**\n"
+            f"Людей в базе: **{len(db)}**\n\n"
+            f"Сейчас в топе:\n{top}\n\n"
+            "Часы в войсе **останутся**, но баллы (контракты + ручные + войс) начнут копиться заново.\n"
+            "Подтвердить: `!обнулить-баллы да`"
+        )
+    stamp = datetime.now(MSK).strftime("%d.%m %H:%M")
+    count = 0
+    for v in db.values():
+        try:
+            total_sec = int(v.get("seconds", 0)) + int(float(v.get("manual_hours", 0) or 0) * 3600)
+        except Exception:
+            total_sec = int(v.get("seconds", 0) or 0)
+        v["points_offset_sec"] = total_sec   # войс-баллы считаем с нуля отсюда
+        v["contract_points"] = 0
+        v["manual_points"] = 0
+        hist = v.get("history") or []
+        hist.append(f"{stamp} — баллы обнулены ({ctx.author.display_name})")
+        v["history"] = hist[-30:]
+        count += 1
+    save_activity(db)
+    await ctx.send(f"✅ Баллы обнулены у **{count}** чел. Часы в войсе сохранены, начисление идёт заново с 0.")
 
 
 def build_stats_embed_for(target: discord.Member, requester_name: str = "—") -> discord.Embed:
@@ -2391,9 +2511,9 @@ def build_stats_embed_for(target: discord.Member, requester_name: str = "—") -
         tmp["seconds"] = base_sec
         hours = round(base_sec / 3600 + float(entry.get("manual_hours", 0)), 2)
         voice_pts = entry_voice_points(tmp)
-        manual_pts = int(entry.get("manual_points", 0))
-        contract_pts = int(entry.get("contract_points", 0))
-        total = voice_pts + manual_pts + contract_pts
+        manual_pts = float(entry.get("manual_points", 0))
+        contract_pts = float(entry.get("contract_points", 0))
+        total = round(voice_pts + manual_pts + contract_pts, 2)
         static = entry.get("static") or "—"
         hist = entry.get("history", [])[-5:]
     else:
@@ -2413,7 +2533,7 @@ def build_stats_embed_for(target: discord.Member, requester_name: str = "—") -
         value=f"**{fmt_hm(seconds=base_sec)}** ({total_min} мин / {hours} ч.){' 🎙️ сейчас в войсе' if in_voice else ''}\n{voice_progress_text(base_sec)}",
         inline=False,
     )
-    e.add_field(name="⭐ Баллы", value=f"Всего **{total}** (войс {voice_pts} + контракты {contract_pts} + вручную {manual_pts})", inline=False)
+    e.add_field(name="⭐ Баллы", value=f"Всего **{fmt_points(total)}** (войс {fmt_points(voice_pts)} + контракты {fmt_points(contract_pts)} + вручную {fmt_points(manual_pts)})", inline=False)
     e.add_field(name="📜 Контракт", value=f"**{roman}** ({cname})", inline=True)
     e.add_field(name="🎯 Дальше", value=fmt_progress(total), inline=True)
     e.add_field(name="🏆 Место в топе", value=f"**{place}** из {max(len(ranked), 1)}", inline=True)
@@ -2554,13 +2674,17 @@ async def reset_season(ctx):
 async def show_rates(ctx):
     """Показать сколько баллов даётся за контракты."""
     rates = load_contract_rates()
-    e = discord.Embed(title="💰 Баллы за контракты", description="Начисляются автоматом при ✅ Принять", color=discord.Color.gold())
-    e.add_field(name="🐟 Дары Моря", value=f"`{rates.get('Дары Моря')}` за 1 шт.\n100 рыб = {int(100*float(rates.get('Дары Моря',0)))} баллов", inline=True)
-    e.add_field(name="⛏️ Металлургия", value=f"`{rates.get('Металлургия')}` за 1 руду\n750 руды = {int(750*float(rates.get('Металлургия',0)))} баллов", inline=True)
-    e.add_field(name="🚢 Корабль", value=f"`{rates.get('Корабль')}` за коробку", inline=True)
-    e.add_field(name="👕 Ателье", value=f"`{rates.get('Ателье')}` за закрытие", inline=True)
+    e = discord.Embed(
+        title="💰 Баллы за контракты",
+        description="Начисляются автоматом при ✅ Принять.\nБаллы дробные: сдал меньше нормы — получишь пропорционально.",
+        color=discord.Color.gold(),
+    )
+    e.add_field(name="🐟 Дары Моря", value=f"**{points_threshold_text(rates.get('Дары Моря'))}**", inline=True)
+    e.add_field(name="👕 Ателье", value=f"**{points_threshold_text(rates.get('Ателье'))}**", inline=True)
+    e.add_field(name="📦 Корабль", value=f"**{points_threshold_text(rates.get('Корабль'))}**", inline=True)
+    e.add_field(name="⛏️ Металлургия", value=f"`{rates.get('Металлургия')}` за 1 руду\n750 руды = {fmt_points(750*float(rates.get('Металлургия',0)))} баллов", inline=True)
     e.add_field(name="⚡ Активация", value=f"база `{rates.get('Активация контракта')}`\nМеталлургия: `{rates.get('Активация:⚡ Металлургия')}`\nКорабль: `{rates.get('Активация:⚡ Корабль')}`\nАтелье: `{rates.get('Активация:⚡ Ателье')}`", inline=False)
-    e.set_footer(text='Менять: !ставка "Дары Моря" 0.3  |  !ставка Металлургия 0.08')
+    e.set_footer(text='Менять: !ставка "Дары Моря" 0.04  |  !ставка Ателье 0.0667  |  !ставка Корабль 0.0333')
     await ctx.send(embed=e)
 
 
