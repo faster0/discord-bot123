@@ -817,6 +817,7 @@ class ContractView(discord.ui.View):
         embed = discord.Embed(
             title="📜 Прайс-лист контрактов", color=discord.Color.blue()
         )
+        embed.set_footer(text="Прайс-лист v2 • Металлургия 3 • Ателье 3")
 
         activation = ALL_DATA.get("Активация контракта", {})
         if activation:
