@@ -53,22 +53,22 @@ ALL_DATA = {
         "🐟 Марлин (ДМ-8)": {"price": 0.95},
         "🐟 Тёмный горбыль (ДМ-8)": {"price": 0.85},
     },
-    "Металлургия": {
+    "Металлургия 3": {
         "⛏️ Железная руда": {"price": 64},
         "⛏️ Серебряная руда": {"price": 120},
         "⛏️ Медная руда": {"price": 210},
-        "⛏️ Золотая руда": {"price": 420},
+        "⛏️ Оловянная руда": {"price": 245},
     },
     "Корабль": {
         "📦 Коробка с корабля": {"price": 950}
     },
-    "Ателье": {
-        "👕 Закрытие Ателье": {"price": 1250}
+    "Ателье 3": {
+        "👕 Фед Тюрма": {"price": 1400}
     },
     "Активация контракта": {
-        "⚡ Металлургия": {"price": 12000},
+        "⚡ Металлургия 3": {"price": 12000},
         "⚡ Корабль": {"price": 12000},
-        "⚡ Ателье": {"price": 6000},
+        "⚡ Ателье 3": {"price": 8000},
     },
 }
 
@@ -815,12 +815,26 @@ class ContractView(discord.ui.View):
             self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         embed = discord.Embed(
-            title="📜 Актуальные цены на контракты", color=discord.Color.blue()
+            title="📜 Прайс-лист контрактов", color=discord.Color.blue()
         )
 
+        activation = ALL_DATA.get("Активация контракта", {})
+        if activation:
+            embed.add_field(
+                name="⚡ Цена активации контракта",
+                value="\n".join(
+                    f"{name} — **{fmt_money(data['price'])}**"
+                    for name, data in activation.items()
+                ),
+                inline=False,
+            )
+
         for cat_name, items in ALL_DATA.items():
+            if cat_name == "Активация контракта":
+                continue
             items_text = "\n".join(
-                [f"{name} — **{data['price']}**" for name, data in items.items()]
+                f"{name} — **{fmt_money(data['price'])}** за шт."
+                for name, data in items.items()
             )
             embed.add_field(
                 name=f"📁 {cat_name}", value=items_text, inline=False
@@ -1382,14 +1396,14 @@ CONTRACT_RATES_VERSION = 2
 #   Корабль: 1/30 -> 30 коробок = 1 балл
 DEFAULT_CONTRACT_RATES = {
     "Дары Моря": 1 / 25,        # 25 рыбы = 1 балл
-    "Металлургия": 0.06,        # 750 руды = 45 баллов
+    "Металлургия 3": 0.06,      # 750 руды = 45 баллов
     "Корабль": 1 / 30,          # 30 коробок = 1 балл
-    "Ателье": 1 / 15,           # 15 = 1 балл
+    "Ателье 3": 1 / 15,         # 15 = 1 балл
     "Активация контракта": 25.0,  # базовая за активацию
     # точечно для активаций (если надо разные):
-    "Активация:⚡ Металлургия": 30.0,
+    "Активация:⚡ Металлургия 3": 30.0,
     "Активация:⚡ Корабль": 25.0,
-    "Активация:⚡ Ателье": 20.0,
+    "Активация:⚡ Ателье 3": 20.0,
 }
 # =========================================
 
@@ -1427,6 +1441,17 @@ def get_rate_for_item(item_name: str, category: str) -> float:
     if category == "Активация контракта":
         return float(rates.get(f"Активация:{item_name}", rates.get("Активация контракта", 25.0)))
     return float(rates.get(category, 0))
+
+
+def fmt_money(value) -> str:
+    """Красивый вывод денег: 1400 -> '1 400', 1.4 -> '1.40'."""
+    try:
+        v = float(value)
+    except Exception:
+        return "0"
+    if abs(v - round(v)) < 1e-9:
+        return f"{int(round(v)):,}".replace(",", " ")
+    return f"{v:,.2f}".replace(",", " ")
 
 
 def fmt_points(value) -> str:
@@ -2794,16 +2819,16 @@ def build_rates_embed() -> discord.Embed:
         color=discord.Color.gold(),
     )
     e.add_field(name="🐟 Дары Моря", value=f"**{points_threshold_text(rates.get('Дары Моря'))}**\nнапр. 50 шт = {fmt_points(50 * float(rates.get('Дары Моря', 0)))} б.", inline=True)
-    e.add_field(name="👕 Ателье", value=f"**{points_threshold_text(rates.get('Ателье'))}**\nнапр. 30 = {fmt_points(30 * float(rates.get('Ателье', 0)))} б.", inline=True)
+    e.add_field(name="👕 Ателье 3", value=f"**{points_threshold_text(rates.get('Ателье 3'))}**\nнапр. 30 = {fmt_points(30 * float(rates.get('Ателье 3', 0)))} б.", inline=True)
     e.add_field(name="📦 Корабль", value=f"**{points_threshold_text(rates.get('Корабль'))}**\nнапр. 60 = {fmt_points(60 * float(rates.get('Корабль', 0)))} б.", inline=True)
-    e.add_field(name="⛏️ Металлургия", value=f"`{rates.get('Металлургия')}` за 1 руду\n750 = {fmt_points(750 * float(rates.get('Металлургия', 0)))} б.", inline=True)
-    e.add_field(name="⚡ Активация", value=f"база `{rates.get('Активация контракта')}`\nМеталлургия: `{rates.get('Активация:⚡ Металлургия')}`\nКорабль: `{rates.get('Активация:⚡ Корабль')}`\nАтелье: `{rates.get('Активация:⚡ Ателье')}`", inline=False)
+    e.add_field(name="⛏️ Металлургия 3", value=f"`{rates.get('Металлургия 3')}` за 1 руду\n750 = {fmt_points(750 * float(rates.get('Металлургия 3', 0)))} б.", inline=True)
+    e.add_field(name="⚡ Активация", value=f"база `{rates.get('Активация контракта')}`\nМеталлургия 3: `{rates.get('Активация:⚡ Металлургия 3')}`\nКорабль: `{rates.get('Активация:⚡ Корабль')}`\nАтелье 3: `{rates.get('Активация:⚡ Ателье 3')}`", inline=False)
     e.add_field(
         name="📜 Контракты (порог баллов)",
         value=" / ".join(f"{n}={need}" for need, n, _r in sorted(CONTRACT_LEVELS)),
         inline=False,
     )
-    e.set_footer(text='Менять: !ставка "Дары Моря" 0.04  |  !ставка Ателье 0.0667  |  !ставка Корабль 0.0333')
+    e.set_footer(text='Менять: !ставка "Дары Моря" 0.04  |  !ставка "Ателье 3" 0.0667  |  !ставка Корабль 0.0333')
     return e
 
 
